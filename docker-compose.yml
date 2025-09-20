@@ -1,0 +1,106 @@
+version: '3.8'
+
+# 注意: 使用环境变量配置端口
+# 请在启动时使用: docker-compose --env-file config.env up -d
+# 或者修改下面的环境变量值
+
+services:
+  nginx-manager:
+    # 使用预构建的镜像 (推荐)
+    image: docker.io/wtation/nginx-manager:latest
+    # 如果需要本地构建，请取消注释下面的build配置
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    container_name: nginx-manager
+    restart: unless-stopped
+
+    # 端口映射 (使用环境变量)
+    ports:
+      - "${EXTERNAL_HTTP_PORT:-7000}:${INTERNAL_HTTP_PORT:-5000}"    # HTTP端口
+      - "${EXTERNAL_HTTPS_PORT:-8443}:${INTERNAL_HTTPS_PORT:-5001}"  # HTTPS端口
+      - "${NGINX_HTTP_PORT:-80}:80"                                  # Nginx HTTP端口
+      - "${NGINX_HTTPS_PORT:-443}:443"                              # Nginx HTTPS端口
+
+    # 环境变量 (使用环境变量)
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Production}
+      - ASPNETCORE_URLS=http://+:${INTERNAL_HTTP_PORT:-5000};https://+:${INTERNAL_HTTPS_PORT:-5001}
+      - DOTNET_RUNNING_IN_CONTAINER=true
+      # 数据库配置
+      - ConnectionStrings__Default=Data Source=${DATABASE_PATH:-/app/data/nginxmanager.db}
+      # Nginx管理器配置
+      - NginxManager__DefaultDataDir=/app/data
+      - NginxManager__DefaultNginxDir=/app/nginx-instances
+      - NginxManager__DefaultSslDir=/app/ssl
+      - NginxManager__DefaultLogDir=/app/logs
+      # Web根目录配置
+      - NginxManager__DefaultWebRootDir=/var/www/html
+
+    # 卷挂载 - 映射到宿主机目录
+    volumes:
+      # 数据持久化 (使用统一的数据目录)
+      - ${DATA_BASE_DIR:-./dockernpm-data}/data:/app/data:rw
+      # Nginx实例目录
+      - ${DATA_BASE_DIR:-./dockernpm-data}/nginx-instances:/app/nginx-instances:rw
+      # SSL证书目录
+      - ${DATA_BASE_DIR:-./dockernpm-data}/ssl:/app/ssl:rw
+      # 日志目录
+      - ${DATA_BASE_DIR:-./dockernpm-data}/logs:/app/logs:rw
+      # Web根目录（用于ACME挑战）
+      - ${DATA_BASE_DIR:-./dockernpm-data}/www:/var/www/html:rw
+      # 临时文件目录（可选，用于下载缓存）
+      - ${DATA_BASE_DIR:-./dockernpm-data}/temp:/tmp:rw
+
+    # 网络配置
+    networks:
+      - nginx-network
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+# 如果需要，可以添加独立的Nginx反向代理
+#  nginx-proxy:
+#    image: nginx:alpine
+#    container_name: nginx-proxy
+#    restart: unless-stopped
+#    ports:
+#      - "80:80"
+#      - "443:443"
+#    volumes:
+#      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+#      - ./ssl:/etc/nginx/ssl:ro
+#    depends_on:
+#      - nginx-manager
+#    networks:
+#      - nginx-network
+
+networks:
+  nginx-network:
+    driver: bridge
+
+# 卷定义（可选，用于数据持久化）
+volumes:
+  nginx-data:
+    driver: local
+  nginx-instances:
+    driver: local
+  nginx-ssl:
+    driver: local
+  nginx-logs:
+    driver: local
+  nginx-www:
+    driver: local
