@@ -1,18 +1,14 @@
-version: '3.8'
-
+﻿version: '3.8'
 services:
   nginx-manager:
-    image: docker.io/wtation/nginx-manager:latest
+    image: nginx-manager
     container_name: nginx-manager
     restart: unless-stopped
-
-    # 端口映射 (本地绑定 (127.0.0.1))
     ports:
-      - 127.0.0.1:8080:5000    # HTTP端口
-      - 127.0.0.1:8444:5001  # HTTPS端口
-      - 127.0.0.1:8081:80   # Nginx HTTP端口
-      - 127.0.0.1:8444:443  # Nginx HTTPS端口
-
+      - "127.0.0.1:8080:5000"
+      - "127.0.0.1:8445:5001"
+      - "127.0.0.1:8081:80"
+      - "127.0.0.1:8446:443"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:5000;https://+:5001
@@ -23,32 +19,27 @@ services:
       - NginxManager__DefaultSslDir=/app/ssl
       - NginxManager__DefaultLogDir=/app/logs
       - NginxManager__DefaultWebRootDir=/var/www/html
-
     volumes:
-      - ./my-data/data:/app/data:rw
-      - ./my-data/nginx-instances:/app/nginx-instances:rw
-      - ./my-data/ssl:/app/ssl:rw
-      - ./my-data/logs:/app/logs:rw
-      - ./my-data/www:/var/www/html:rw
-      - ./my-data/temp:/tmp:rw
-
+      - ./dockernpm-data/data:/app/data:rw
+      - ./dockernpm-data/nginx-instances:/app/nginx-instances:rw
+      - ./dockernpm-data/ssl:/app/ssl:rw
+      - ./dockernpm-data/logs:/app/logs:rw
+      - ./dockernpm-data/www:/var/www/html:rw
+      - ./dockernpm-data/temp:/tmp:rw
     networks:
       - nginx-network
-
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-
     deploy:
       resources:
         limits:
           memory: 1G
         reservations:
           memory: 256M
-
 networks:
   nginx-network:
     driver: bridge

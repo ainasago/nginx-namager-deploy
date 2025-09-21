@@ -15,7 +15,22 @@ param(
 # ==========================
 # 配置
 # ==========================
-$IMAGE_NAME = "docker.io/wtation/nginx-manager:latest"
+# 构建镜像名称的函数
+function Get-DefaultImageName {
+    # 检查 docker-compose.yml 中的镜像名称
+    $composeFile = Join-Path (Split-Path $PSScriptRoot -Parent) "NginxManager/docker-compose.yml"
+    if (Test-Path $composeFile) {
+        $composeContent = Get-Content $composeFile -Raw
+        if ($composeContent -match 'image:\s*(.+)') {
+            return $matches[1].Trim()
+        }
+    }
+
+    # 默认镜像名称（如果找不到配置）
+    return "docker.io/wtation/nginx-manager:latest"
+}
+
+$IMAGE_NAME = Get-DefaultImageName
 $CONFIG_FILE = "config.env"
 $COMPOSE_FILE = "docker-compose.yml"
 $LOCALHOST_ONLY = $false
@@ -231,23 +246,52 @@ function Test-Image {
     Write-Info "Checking Docker image..."
 
     try {
-        # 检查完整镜像名
-        $fullImage = docker images $IMAGE_NAME --format "{{.Repository}}:{{.Tag}}"
-        if ($fullImage -and $fullImage.Contains($IMAGE_NAME)) {
-            Write-Ok "Image found: $IMAGE_NAME"
+        # 获取 docker-compose.yml 中定义的镜像名称
+        $composeFile = Join-Path (Split-Path $PSScriptRoot -Parent) "NginxManager/docker-compose.yml"
+        $configuredImage = $IMAGE_NAME  # 默认值
+
+        if (Test-Path $composeFile) {
+            $composeContent = Get-Content $composeFile -Raw
+            if ($composeContent -match 'image:\s*(.+)') {
+                $configuredImage = $matches[1].Trim()
+                Write-Info "Configured image in docker-compose.yml: $configuredImage"
+            }
+        }
+
+        # 检查配置的镜像
+        $configuredImages = docker images $configuredImage --format "{{.Repository}}:{{.Tag}}"
+        if ($configuredImages -and $configuredImages.Contains($configuredImage)) {
+            Write-Ok "Configured image found: $configuredImage"
+            return $true
+        }
+
+        # 检查默认镜像名
+        $defaultImages = docker images $IMAGE_NAME --format "{{.Repository}}:{{.Tag}}"
+        if ($defaultImages -and $defaultImages.Contains($IMAGE_NAME)) {
+            Write-Ok "Default image found: $IMAGE_NAME"
             return $true
         }
 
         # 检查简化镜像名 (去掉docker.io前缀)
         $shortName = $IMAGE_NAME -replace "^docker\.io/", ""
-        $shortImage = docker images $shortName --format "{{.Repository}}:{{.Tag}}"
-        if ($shortImage -and $shortImage.Contains($shortName)) {
-            Write-Ok "Image found: $shortName"
+        $shortImages = docker images $shortName --format "{{.Repository}}:{{.Tag}}"
+        if ($shortImages -and $shortImages.Contains($shortName)) {
+            Write-Ok "Local image found: $shortName"
             return $true
         }
 
-        Write-Warn "Image not found: $IMAGE_NAME"
-        Write-Host "Pull command: docker pull $IMAGE_NAME"
+        # 检查是否有任何 nginx-manager 相关的镜像
+        $allImages = docker images --format "{{.Repository}}:{{.Tag}}" | Where-Object { $_ -match "nginx-manager" }
+        if ($allImages) {
+            Write-Ok "Found nginx-manager image: $($allImages[0])"
+            return $true
+        }
+
+        Write-Warn "No suitable image found"
+        Write-Host "Available options:" -ForegroundColor Cyan
+        Write-Host "1. Pull from registry: docker pull $IMAGE_NAME" -ForegroundColor White
+        Write-Host "2. Build locally: cd ../../deploy/compose && .\build-image.ps1" -ForegroundColor White
+        Write-Host "3. Use existing image: docker images | findstr nginx-manager" -ForegroundColor White
         return $false
     }
     catch {
@@ -461,12 +505,119 @@ networks:
     Write-Ok "Docker Compose configuration generated (${bindingMode})"
 }
 
+# 检查并处理现有容器
+function Test-ExistingContainer {
+    Write-Info "Checking for existing containers..."
+
+    try {
+        # 检查是否存在同名容器
+        $existingContainer = docker ps -a --filter "name=nginx-manager" --format "{{.Names}}" 2>$null
+        if ($existingContainer -and $existingContainer.Contains("nginx-manager")) {
+            Write-Warn "Found existing container: nginx-manager"
+
+            # 获取容器状态
+            $containerStatus = docker ps -a --filter "name=nginx-manager" --format "{{.Status}}" 2>$null
+            Write-Host "Container status: $containerStatus" -ForegroundColor Gray
+
+            # 检查是否在运行
+            $isRunning = docker ps --filter "name=nginx-manager" --format "{{.Names}}" 2>$null
+            if ($isRunning) {
+                Write-Warn "Container is currently running"
+            }
+
+            # 如果是强制模式，直接删除
+            if ($Force) {
+                Write-Info "Force mode enabled - removing existing container..."
+                try {
+                    docker rm -f nginx-manager 2>$null | Out-Null
+                    Write-Ok "Existing container removed"
+                    return $true
+                }
+                catch {
+                    Write-Error "Failed to remove existing container: $_"
+                    return $false
+                }
+            }
+
+            # 询问用户如何处理
+            Write-Host ""
+            Write-Host "Options:" -ForegroundColor Cyan
+            Write-Host "1. Remove existing container and continue deployment" -ForegroundColor Yellow
+            Write-Host "2. Keep existing container and skip deployment" -ForegroundColor Yellow
+            Write-Host "3. Show container details" -ForegroundColor Yellow
+            Write-Host ""
+
+            do {
+                $choice = Read-Host "Choose option (1-3)"
+                switch ($choice) {
+                    "1" {
+                        Write-Info "Removing existing container..."
+                        try {
+                            docker rm -f nginx-manager 2>$null | Out-Null
+                            Write-Ok "Existing container removed"
+                            return $true
+                        }
+                        catch {
+                            Write-Error "Failed to remove existing container: $_"
+                            return $false
+                        }
+                    }
+                    "2" {
+                        Write-Info "Keeping existing container - deployment skipped"
+                        return $false
+                    }
+                    "3" {
+                        Write-Info "Container details:"
+                        try {
+                            $details = docker ps -a --filter "name=nginx-manager" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+                            Write-Host $details
+                            Write-Host ""
+                            $logsChoice = Read-Host "Show container logs? (y/N)"
+                            if ($logsChoice -match "^[Yy]$") {
+                                Write-Host "Last 20 lines of logs:" -ForegroundColor Cyan
+                                docker logs --tail=20 nginx-manager
+                                Write-Host ""
+                            }
+                        }
+                        catch {
+                            Write-Warn "Could not get container details: $_"
+                        }
+                        # 重新显示选项
+                        Write-Host ""
+                        Write-Host "Options:" -ForegroundColor Cyan
+                        Write-Host "1. Remove existing container and continue deployment" -ForegroundColor Yellow
+                        Write-Host "2. Keep existing container and skip deployment" -ForegroundColor Yellow
+                        Write-Host "3. Show container details (already shown)" -ForegroundColor Gray
+                        Write-Host ""
+                        continue
+                    }
+                    default {
+                        Write-Warn "Invalid choice. Please enter 1-3."
+                    }
+                }
+            } while ($true)
+        } else {
+            Write-Ok "No existing containers found"
+            return $true
+        }
+    }
+    catch {
+        Write-Warn "Could not check for existing containers: $_"
+        return $true  # 继续部署
+    }
+}
+
 # 部署服务
 function Start-Deployment {
     Write-Header "🚀 Starting Nginx Manager Deployment"
 
     # 生成Docker Compose配置
     New-ComposeFile
+
+    # 检查并处理现有容器
+    if (-not (Test-ExistingContainer)) {
+        return $false
+    }
 
     # 停止可能存在的旧服务
     Write-Info "Stopping existing services..."
@@ -1075,6 +1226,12 @@ function Invoke-Main {
         return Invoke-DefaultInstallation
     }
 
+    # 如果指定了 Force 参数，直接执行默认安装（强制模式）
+    if ($Force) {
+        Write-Info "Force mode enabled - proceeding with default installation"
+        return Invoke-DefaultInstallation
+    }
+
     if ($MenuOption) {
         switch ($MenuOption) {
             "1" { return Invoke-DefaultInstallation }
@@ -1137,14 +1294,21 @@ if ($Help -or ($args -contains "--help") -or ($args -contains "-h")) {
     Write-Host "Nginx Manager Deployment Script" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Usage:" -ForegroundColor Yellow
-    Write-Host "  .\deploy.ps1                    - Interactive menu mode"
-    Write-Host "  .\deploy.ps1 -MenuOption 1      - Default installation"
-    Write-Host "  .\deploy.ps1 -MenuOption 2      - Custom installation"
-    Write-Host "  .\deploy.ps1 -MenuOption 3      - Maintenance menu"
-    Write-Host "  .\deploy.ps1 -MenuOption 4      - Restore defaults"
-    Write-Host "  .\deploy.ps1 -Silent            - Silent default installation"
-    Write-Host "  .\deploy.ps1 -Force             - Force mode (override existing)"
-    Write-Host "  .\deploy.ps1 -Help              - Show this help message"
+    Write-Host "  .\deploy.ps1                           - Interactive menu mode"
+    Write-Host "  .\deploy.ps1 -MenuOption 1             - Default installation"
+    Write-Host "  .\deploy.ps1 -MenuOption 2             - Custom installation"
+    Write-Host "  .\deploy.ps1 -MenuOption 3             - Maintenance menu"
+    Write-Host "  .\deploy.ps1 -MenuOption 4             - Restore defaults"
+    Write-Host "  .\deploy.ps1 -Silent                   - Silent default installation"
+    Write-Host "  .\deploy.ps1 -Force                    - Force mode (auto-remove existing containers)"
+    Write-Host "  .\deploy.ps1 -Force -Silent            - Force update without prompts"
+    Write-Host "  .\deploy.ps1 -Help                     - Show this help message"
+    Write-Host ""
+    Write-Host "Parameters:" -ForegroundColor Yellow
+    Write-Host "  -MenuOption <1-4>    - Run specific menu option"
+    Write-Host "  -Silent              - Run in silent mode (no prompts)"
+    Write-Host "  -Force               - Force mode (auto-remove conflicting containers)"
+    Write-Host "  -Help                - Show this help message"
     Write-Host ""
     Write-Host "Menu Options:" -ForegroundColor Yellow
     Write-Host "  1. Default One-Click Installation"
@@ -1152,6 +1316,12 @@ if ($Help -or ($args -contains "--help") -or ($args -contains "-h")) {
     Write-Host "  3. Maintenance & Management"
     Write-Host "  4. Restore to Default Configuration"
     Write-Host "  5. Exit"
+    Write-Host ""
+    Write-Host "Examples:" -ForegroundColor Cyan
+    Write-Host "  .\deploy.ps1                         # Interactive mode"
+    Write-Host "  .\deploy.ps1 -Force                  # Force update existing installation"
+    Write-Host "  .\deploy.ps1 -Force -Silent          # Silent force update"
+    Write-Host "  .\deploy.ps1 -MenuOption 1 -Force    # Force default installation"
     Write-Host ""
     exit 0
 }
